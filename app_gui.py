@@ -4,6 +4,17 @@ import os
 import numpy as np
 import base64
 import json
+import warnings
+
+# Silenciamos los molestos avisos amarillos de Flet 0.80+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# Motor de renderizado 3D en segundo plano (sin ventanas externas)
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+import io
 
 # Importamos tu motor matemático
 from config_camara import ConfigCamara
@@ -20,13 +31,11 @@ class NurseCareApp:
         self.page.bgcolor = "#f0f2f5"
         self.page.scroll = "auto"
         
-        # Motores IA y Matemáticos
         self.config = ConfigCamara()
         self.adquisicion = MotorAnalisisHeridas(chessboard_size=(9, 6))
         self.analizador_2d = AnalizadorTejidos(n_colores=3)
         self.motor_3d = Reconstructor3D(self.config)
         
-        # Estado
         self.img1_bgr = None
         self.img1_original = None  
         self.img2_bgr = None
@@ -69,7 +78,6 @@ class NurseCareApp:
             border_radius=10,
         )
 
-        # FIX: Añadimos on_pan_end para detectar cuándo sueltas el ratón
         self.detector_trazado = ft.GestureDetector(
             content=self.contenedor_pizarra,
             on_pan_update=self.trazar_borde,
@@ -109,11 +117,12 @@ class NurseCareApp:
 
 
         # ==========================================
-        # PANTALLA 2: DASHBOARD DE RESULTADOS (3 TARJETAS)
+        # PANTALLA 2: DASHBOARD DE RESULTADOS
         # ==========================================
         self.visor_res_recorte = ft.Image(src="", expand=True, fit="contain")
         self.visor_res_segmentado = ft.Image(src="", expand=True, fit="contain")
-        self.visor_res_3d = ft.Text("Nube 3D en construcción...", color="grey500")
+        # Sustituimos el texto por una imagen gráfica para el render 3D
+        self.visor_res_3d = ft.Image(src="", expand=True, fit="contain")
 
         def crear_tarjeta(titulo, contenido):
             return ft.Container(
@@ -167,7 +176,7 @@ class NurseCareApp:
         self.page.update()
 
     # ==========================================
-    # LÓGICA DE EXTRACCIÓN Y DIBUJO (OPTIMIZADA)
+    # LÓGICA DE EXTRACCIÓN Y DIBUJO
     # ==========================================
     def extraer_coordenadas(self, e):
         if hasattr(e, 'local_position') and e.local_position is not None:
@@ -177,21 +186,16 @@ class NurseCareApp:
         return None, None
 
     def actualizar_dibujo(self, cerrar_poligono=False):
-        """Redibuja toda la capa de puntos. Controla si la forma debe cerrarse visualmente."""
         if self.img1_original is None: return
         
         img_dibujo = self.img1_original.copy()
-        
         for i in range(len(self.puntos_reales)):
-            # Puntos en rojo
             cv2.circle(img_dibujo, self.puntos_reales[i], 4, (0, 0, 255), -1)
-            # Líneas en amarillo
             if i > 0:
                 cv2.line(img_dibujo, self.puntos_reales[i-1], self.puntos_reales[i], (0, 255, 255), 2)
                 
-        # Si ordenamos cerrar el polígono (al soltar el ratón) y hay puntos suficientes
         if cerrar_poligono and len(self.puntos_reales) > 2:
-            cv2.line(img_dibujo, self.puntos_reales[-1], self.puntos_reales[0], (0, 255, 0), 3) # Línea verde
+            cv2.line(img_dibujo, self.puntos_reales[-1], self.puntos_reales[0], (0, 255, 0), 3)
 
         self.img_recorte.src = self.convertir_cv2_a_base64(img_dibujo)
         self.page.update()
@@ -203,8 +207,6 @@ class NurseCareApp:
         x_real = int(x_web * ancho_real / self.ANCHO_VISOR_GRANDE)
         y_real = int(y_web * alto_real / self.ALTO_VISOR_GRANDE)
 
-        # --- FILTRO ANTI-LAG ---
-        # Solo guardamos y repintamos si el ratón se ha movido más de 15 píxeles reales.
         if len(self.puntos_reales) > 0:
             ultimo_x, ultimo_y = self.puntos_reales[-1]
             distancia = ((x_real - ultimo_x)**2 + (y_real - ultimo_y)**2)**0.5
@@ -227,9 +229,7 @@ class NurseCareApp:
             self.guardar_y_dibujar_punto(x, y)
 
     def soltar_raton(self, e):
-        """Se activa automáticamente al levantar el clic izquierdo."""
         if len(self.puntos_reales) > 2:
-            # Cierra el polígono con la línea verde y activa el botón final
             self.actualizar_dibujo(cerrar_poligono=True)
             self.btn_analizar.disabled = False
             self.page.update()
@@ -273,20 +273,57 @@ class NurseCareApp:
     def procesar_analisis(self, e):
         if len(self.puntos_reales) < 3: return
 
+        # 1. Segmentación K-Means
         img_recortada, mascara_roi = self.analizador_2d.aplicar_mascara_poligono(self.img1_original, self.puntos_reales)
-        
         img_aislada = cv2.bitwise_and(self.img1_original, self.img1_original, mask=(mascara_roi*255).astype(np.uint8))
         
         _, segmentos = self.analizador_2d.segmentar_kmeans(img_recortada)
         tej_nec, tej_gra, tej_esf = self.analizador_2d.ordenar_tejidos(segmentos)
+        
+        # Corrección: Inversión de etiquetas Necrosis <-> Granulación
+        tej_nec, tej_gra = tej_gra, tej_nec
         
         mapa_colores = np.zeros_like(img_recortada)
         mapa_colores[cv2.cvtColor(tej_nec, cv2.COLOR_BGR2GRAY) > 0] = [50, 50, 50]    
         mapa_colores[cv2.cvtColor(tej_esf, cv2.COLOR_BGR2GRAY) > 0] = [0, 255, 255]   
         mapa_colores[cv2.cvtColor(tej_gra, cv2.COLOR_BGR2GRAY) > 0] = [0, 0, 255]     
         
+        # Corrección: Aislamos el fondo en color Blanco Puro (255, 255, 255)
+        fondo_blanco = np.ones_like(img_recortada) * 255
+        mascara_3d_mask = np.expand_dims(mascara_roi, axis=-1)
+        mapa_colores = np.where(mascara_3d_mask == 1, mapa_colores, fondo_blanco)
+        
+        # 2. Renderizado 3D Fotogramétrico
+        mascara_8u = (mascara_roi * 255).astype(np.uint8)
+        nube_puntos, colores_pts = self.motor_3d.calcular_3d(self.img1_bgr, self.img2_bgr, self.pts1, self.pts2, mascara_8u)
+        
+        # Generar imagen 3D usando Matplotlib en RAM
+        fig = plt.figure(figsize=(5, 5))
+        ax = fig.add_subplot(111, projection='3d')
+        
+        if nube_puntos is not None and len(nube_puntos) > 0:
+            try:
+                # Invertimos colores BGR (OpenCV) a RGB (Matplotlib) para texturizado
+                colores_rgb = colores_pts[:, ::-1] / 255.0
+                ax.scatter(nube_puntos[:, 0], nube_puntos[:, 1], nube_puntos[:, 2], c=colores_rgb, marker='.', s=15)
+            except Exception:
+                ax.scatter(nube_puntos[:, 0], nube_puntos[:, 1], nube_puntos[:, 2], c='blue', marker='.', s=15)
+        else:
+            ax.text2D(0.5, 0.5, "Ausencia de textura\npara triangular puntos", 
+                      horizontalalignment='center', verticalalignment='center', transform=ax.transAxes)
+            
+        ax.set_axis_off()
+        fig.tight_layout(pad=0)
+        
+        buf = io.BytesIO()
+        plt.savefig(buf, format='jpg', bbox_inches='tight', pad_inches=0)
+        plt.close(fig)
+        img_3d_base64 = f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}"
+
+        # 3. Actualización de Interfaz
         self.visor_res_recorte.src = self.convertir_cv2_a_base64(img_aislada)
         self.visor_res_segmentado.src = self.convertir_cv2_a_base64(mapa_colores)
+        self.visor_res_3d.src = img_3d_base64
 
         resultados = self.analizador_2d.calcular_areas_y_porcentajes(mascara_roi, tej_nec, tej_gra, tej_esf, factor_escala=0.25)
         self.lbl_area.value = f"{resultados['areas']['total']:.2f} mm²"
