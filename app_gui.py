@@ -1,11 +1,11 @@
 import flet as ft
-import flet_charts as fch
-import flet_webview as fvw  # Añade esta línea
+import flet_webview as fvw
 import cv2
 import os
 import numpy as np
 import base64
 import warnings
+import tempfile # Añadido para crear el archivo HTML temporal
 
 # Silenciamos de forma global los avisos de depreciación de Flet 0.80+
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -43,6 +43,7 @@ class NurseCareApp:
         self.pts1 = None
         self.pts2 = None
         self.puntos_reales = []    
+        self.html_file_path = None # Guardar la ruta del archivo HTML temporal
         
         self.ANCHO_VISOR_GRANDE = 800
         self.ALTO_VISOR_GRANDE = 600
@@ -90,8 +91,6 @@ class NurseCareApp:
         self.visor_res_recorte = ft.Image(src="", expand=True, fit="contain")
         self.visor_res_segmentado = ft.Image(src="", expand=True, fit="contain")
         
-        # FIX DEFINITIVO: Componente WebView incrustado. Adiós Kaleido y Chrome.
-        # Creamos un iframe HTML vacío al arrancar
         # Inicializamos el visor como un simple texto al arrancar la app
         self.visor_res_3d = ft.Container(
             content=ft.Text("Malla 3D en construcción...", color="grey500"),
@@ -258,13 +257,15 @@ class NurseCareApp:
         _, segmentos = self.analizador_2d.segmentar_kmeans(img_recortada)
         tej_nec, tej_gra, tej_esf = self.analizador_2d.ordenar_tejidos(segmentos)
         
-        # Corrección de etiquetas invertidas Necrosis <-> Granulación
-        tej_nec, tej_gra = tej_gra, tej_nec
+        # --- FIX DEFINITIVO DE COLOR ---
+        # Intercambiamos de raíz las variables devueltas por tu motor para corregir la inversión
+        tej_correct_nec = tej_gra
+        tej_correct_gra = tej_nec
         
         mapa_colores = np.zeros_like(img_recortada)
-        mapa_colores[cv2.cvtColor(tej_nec, cv2.COLOR_BGR2GRAY) > 0] = [50, 50, 50]    # Gris (Necrosis)
+        mapa_colores[cv2.cvtColor(tej_correct_nec, cv2.COLOR_BGR2GRAY) > 0] = [50, 50, 50]    # Gris (Necrosis)
         mapa_colores[cv2.cvtColor(tej_esf, cv2.COLOR_BGR2GRAY) > 0] = [0, 255, 255]   # Amarillo (Esfacelo)
-        mapa_colores[cv2.cvtColor(tej_gra, cv2.COLOR_BGR2GRAY) > 0] = [0, 0, 255]     # Rojo (Granulación)
+        mapa_colores[cv2.cvtColor(tej_correct_gra, cv2.COLOR_BGR2GRAY) > 0] = [0, 0, 255]     # Rojo (Granulación)
         
         # Configurar el fondo fuera de la úlcera en Blanco Puro
         fondo_blanco = np.ones_like(img_recortada) * 255
@@ -306,7 +307,6 @@ class NurseCareApp:
                 # Mapeamos la textura fotográfica real (RGB) sobre cada vértice de la malla
                 colores_vertices = []
                 for x_p, y_p in zip(x_densos, y_densos):
-                    # OpenCV usa BGR, Plotly usa RGB. Convertimos:
                     b, g, r = self.img1_original[y_p, x_p]
                     colores_vertices.append(f"rgb({r},{g},{b})")
 
@@ -315,16 +315,16 @@ class NurseCareApp:
                 indices_triangulos = triangulacion.simplices
 
                 # Construimos la estructura Mesh3D interactiva texturizada
-                # Ajustes de cámara y proporciones reales para fines clínicos
-                fig.update_layout(
-                    margin=dict(l=0, r=0, b=0, t=0),
-                    scene=dict(
-                        xaxis=dict(visible=False),
-                        yaxis=dict(visible=False, autorange="reversed"), # FIX: 'reversed' con 'd' final
-                        zaxis=dict(visible=False),
-                        aspectmode='data' # Garantiza proporciones geométricas reales no deformadas
-                    )
-                )
+                fig.add_trace(go.Mesh3d(
+                    x=x_densos,
+                    y=y_densos,
+                    z=z_densos,
+                    i=indices_triangulos[:, 0],
+                    j=indices_triangulos[:, 1],
+                    k=indices_triangulos[:, 2],
+                    vertexcolor=colores_vertices,
+                    flatshading=True
+                ))
         else:
             # Si no hay textura suficiente para triangular
             fig.add_trace(go.Scatter3d(
@@ -338,22 +338,20 @@ class NurseCareApp:
             margin=dict(l=0, r=0, b=0, t=0),
             scene=dict(
                 xaxis=dict(visible=False),
-                yaxis=dict(visible=False, autorange="reversed"), # FIX: 'reversed' con 'd' al final
+                yaxis=dict(visible=False, autorange="reversed"), 
                 zaxis=dict(visible=False),
-                aspectmode='data' # Garantiza proporciones geométricas reales no deformadas
+                aspectmode='data' 
             )
         )
 
         # -------------------------------------------------------------
-        # SOLUCIÓN DOCKER: Exportamos a HTML en memoria y renderizamos
+        # FIX VISOR 3D: Convertimos a string HTML completo y codificamos en Base64
         # -------------------------------------------------------------
-        # Generamos el código HTML interactivo COMPLETO
-        html_str = fig.to_html(include_plotlyjs="cdn", full_html=True) # FIX: Documento web completo
-        # Lo convertimos a una URL de datos Base64
+        html_str = fig.to_html(include_plotlyjs="cdn", full_html=True)
         b64_html = base64.b64encode(html_str.encode("utf-8")).decode("utf-8")
         data_uri = f"data:text/html;base64,{b64_html}"
         
-        # ¡AQUÍ SÍ! Inyectamos el HTML interactivo reemplazando el texto temporal
+        # Inyectamos de forma segura la URL de datos en el WebView web nativo
         self.visor_res_3d.content = fvw.WebView(
             url=data_uri,
             expand=True
@@ -363,7 +361,8 @@ class NurseCareApp:
         self.visor_res_recorte.src = self.convertir_cv2_a_base64(img_aislada)
         self.visor_res_segmentado.src = self.convertir_cv2_a_base64(mapa_colores)
 
-        resultados = self.analizador_2d.calcular_areas_y_porcentajes(mascara_roi, tej_nec, tej_gra, tej_esf, factor_escala=0.25)
+        # Enviamos las variables corregidas al calculador de métricas para que los porcentajes no bailen
+        resultados = self.analizador_2d.calcular_areas_y_porcentajes(mascara_roi, tej_correct_nec, tej_correct_gra, tej_esf, factor_escala=0.25)
         self.lbl_area.value = f"{resultados['areas']['total']:.2f} mm²"
         self.lbl_nec.value = f"{resultados['porcentajes']['necrotico']:.1f}%"
         self.lbl_esf.value = f"{resultados['porcentajes']['esfacelo']:.1f}%"
