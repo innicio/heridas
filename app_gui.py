@@ -277,44 +277,62 @@ class NurseCareApp:
         nube_puntos, _ = self.motor_3d.calcular_3d(self.img1_bgr, self.img2_bgr, self.pts1, self.pts2, mascara_8u)
 
         # =======================================================
-        # GENERACIÓN DE MALLA INTERACTIVA TEXTURIZADA (HTML NATIVO)
+        # GENERACIÓN DE MALLA 3D (DELAUNAY + EXAGERACIÓN DE RELIEVE)
         # =======================================================
         fig = go.Figure()
 
         if nube_puntos is not None and len(nube_puntos) > 5:
-            # Localizamos todos los píxeles de la imagen dentro de la úlcera delimitada
+            # 1. Localizamos píxeles dentro de la máscara (la forma de la herida)
             y_indices, x_indices = np.where(mascara_roi > 0)
             
-            # Submuestreo controlado (paso de 12px) para asegurar rotación fluida a 60fps en web
+            # Submuestreo para fluidez web (malla de densidad media)
             salto_muestreo = 12
             x_densos = x_indices[::salto_muestreo]
             y_densos = y_indices[::salto_muestreo]
 
             if len(x_densos) > 3:
-                # Extraemos las coordenadas X, Y, Z conocidas de la fotogrametría
+                # 2. Extraemos X, Y, Z de la nube dispersa de SIFT
                 puntos_x_sift = nube_puntos[:, 0]
                 puntos_y_sift = nube_puntos[:, 1]
                 puntos_z_sift = nube_puntos[:, 2]
 
-                # Interpolamos el relieve Z para la cuadrícula completa de la lesión
-                z_densos = griddata(
+                # 3. Interpolación suave (Linear) en lugar de escalonada
+                # Primero intentamos lineal para suavidad de la malla orgánica
+                z_linear = griddata(
+                    points=np.column_stack((puntos_x_sift, puntos_y_sift)),
+                    values=puntos_z_sift,
+                    xi=(x_densos, y_densos),
+                    method='linear'
+                )
+                # Rellenamos los bordes ciegos con el método 'nearest'
+                z_nearest = griddata(
                     points=np.column_stack((puntos_x_sift, puntos_y_sift)),
                     values=puntos_z_sift,
                     xi=(x_densos, y_densos),
                     method='nearest'
                 )
+                z_densos = np.where(np.isnan(z_linear), z_nearest, z_linear)
 
-                # Mapeamos la textura fotográfica real (RGB) sobre cada vértice de la malla
+                # 4. FIX DE APLASTAMIENTO (Escalado topográfico)
+                # Forzamos matemáticamente que el relieve sea visible escalando Z
+                rango_x = np.max(x_densos) - np.min(x_densos)
+                rango_z = np.max(z_densos) - np.min(z_densos)
+                if rango_z > 0.001:
+                    # Forzamos que la profundidad represente visualmente el 25% del ancho de la lesión
+                    factor_relieve = (rango_x * 0.25) / rango_z
+                    z_densos = (z_densos - np.min(z_densos)) * factor_relieve
+
+                # 5. Mapeo de Textura RGB Original
                 colores_vertices = []
                 for x_p, y_p in zip(x_densos, y_densos):
                     b, g, r = self.img1_original[y_p, x_p]
                     colores_vertices.append(f"rgb({r},{g},{b})")
 
-                # Generamos la topología matemática de triángulos
+                # 6. Triangulación de Delaunay
                 triangulacion = Delaunay(np.column_stack((x_densos, y_densos)))
                 indices_triangulos = triangulacion.simplices
 
-                # Construimos la estructura Mesh3D interactiva texturizada
+                # 7. Renderizado del objeto Mesh3d
                 fig.add_trace(go.Mesh3d(
                     x=x_densos,
                     y=y_densos,
@@ -323,24 +341,24 @@ class NurseCareApp:
                     j=indices_triangulos[:, 1],
                     k=indices_triangulos[:, 2],
                     vertexcolor=colores_vertices,
-                    flatshading=True
+                    flatshading=False, # Suavizado Phong continuo
+                    lighting=dict(ambient=0.7, diffuse=0.8, specular=0.1, roughness=0.9) # Textura mate orgánica
                 ))
         else:
-            # Si no hay textura suficiente para triangular
             fig.add_trace(go.Scatter3d(
                 x=[0], y=[0], z=[0], mode="text",
-                text=["Textura insuficiente para estimar profundidad Z"],
+                text=["Nube de puntos insuficiente"],
                 textposition="top center"
             ))
 
-        # Ajustes de cámara y proporciones reales para fines clínicos
+        # Ajustes de cámara
         fig.update_layout(
             margin=dict(l=0, r=0, b=0, t=0),
             scene=dict(
                 xaxis=dict(visible=False),
                 yaxis=dict(visible=False, autorange="reversed"), 
                 zaxis=dict(visible=False),
-                aspectmode='data' 
+                aspectmode='auto' # FIX: Fundamental cambiar a 'auto' para permitir la exageración en Z
             )
         )
 
