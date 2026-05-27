@@ -1,20 +1,19 @@
 import flet as ft
+import flet_charts as fch
+import flet_webview as fvw  # Añade esta línea
 import cv2
 import os
 import numpy as np
 import base64
-import json
 import warnings
 
-# Silenciamos los molestos avisos amarillos de Flet 0.80+
+# Silenciamos de forma global los avisos de depreciación de Flet 0.80+
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-# Motor de renderizado 3D en segundo plano (sin ventanas externas)
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-import io
+# Importamos Plotly y los motores de interpolación geométrica
+import plotly.graph_objects as go
+from scipy.interpolate import griddata
+from scipy.spatial import Delaunay
 
 # Importamos tu motor matemático
 from config_camara import ConfigCamara
@@ -31,11 +30,13 @@ class NurseCareApp:
         self.page.bgcolor = "#f0f2f5"
         self.page.scroll = "auto"
         
+        # Motores de análisis
         self.config = ConfigCamara()
         self.adquisicion = MotorAnalisisHeridas(chessboard_size=(9, 6))
         self.analizador_2d = AnalizadorTejidos(n_colores=3)
         self.motor_3d = Reconstructor3D(self.config)
         
+        # Variables de estado
         self.img1_bgr = None
         self.img1_original = None  
         self.img2_bgr = None
@@ -58,7 +59,7 @@ class NurseCareApp:
 
     def init_ui(self):
         # ==========================================
-        # PANTALLA 1: ZONA DE SELECCIÓN Y RECORTE
+        # 1. INICIALIZAR TODOS LOS VISORES PRIMERO
         # ==========================================
         self.img_recorte = ft.Image(
             src="", 
@@ -85,6 +86,22 @@ class NurseCareApp:
             on_tap_down=self.clic_suelto_borde
         )
 
+        # Visores del Dashboard de Resultados
+        self.visor_res_recorte = ft.Image(src="", expand=True, fit="contain")
+        self.visor_res_segmentado = ft.Image(src="", expand=True, fit="contain")
+        
+        # FIX DEFINITIVO: Componente WebView incrustado. Adiós Kaleido y Chrome.
+        # Creamos un iframe HTML vacío al arrancar
+        # Inicializamos el visor como un simple texto al arrancar la app
+        self.visor_res_3d = ft.Container(
+            content=ft.Text("Malla 3D en construcción...", color="grey500"),
+            alignment=ft.Alignment(0, 0),
+            expand=True
+        )
+
+        # ==========================================
+        # 2. DEFINIR BOTONES Y ESTRUCTURA DE TARJETAS
+        # ==========================================
         self.btn_cargar = ft.ElevatedButton(
             content=ft.Text("1. Cargar Vídeo", weight="bold"),
             on_click=self.cargar_video_click,
@@ -104,26 +121,6 @@ class NurseCareApp:
             style=ft.ButtonStyle(bgcolor="green700", color="white")
         )
 
-        self.pantalla_recorte = ft.Column([
-            ft.Text("Paso 1: Delimitación de la Úlcera", size=24, weight="bold", color="bluegrey900"),
-            ft.Text("Haz clic y ARRASTRA el ratón bordeando la herida para generar el contorno.", size=16),
-            ft.Row([self.btn_cargar, self.btn_limpiar, self.btn_analizar]),
-            ft.Container(height=20),
-            ft.Container(
-                content=self.detector_trazado,
-                shadow=ft.BoxShadow(spread_radius=1, blur_radius=5, color="black12")
-            )
-        ], alignment=ft.MainAxisAlignment.START, horizontal_alignment=ft.CrossAxisAlignment.CENTER)
-
-
-        # ==========================================
-        # PANTALLA 2: DASHBOARD DE RESULTADOS
-        # ==========================================
-        self.visor_res_recorte = ft.Image(src="", expand=True, fit="contain")
-        self.visor_res_segmentado = ft.Image(src="", expand=True, fit="contain")
-        # Sustituimos el texto por una imagen gráfica para el render 3D
-        self.visor_res_3d = ft.Image(src="", expand=True, fit="contain")
-
         def crear_tarjeta(titulo, contenido):
             return ft.Container(
                 content=ft.Column([
@@ -135,11 +132,12 @@ class NurseCareApp:
             )
 
         tarjetas_resultados = ft.Row([
-            crear_tarjeta("1. Recorte Aislado", self.visor_res_recorte),
-            crear_tarjeta("2. Segmentación K-Means", self.visor_res_segmentado),
-            crear_tarjeta("3. Reconstrucción 3D", self.visor_res_3d)
+            crear_tarjeta("1. Recorte Real 2D", self.visor_res_recorte),
+            crear_tarjeta("2. Segmentación Aislada", self.visor_res_segmentado),
+            crear_tarjeta("3. Malla 3D Texturizada", self.visor_res_3d)
         ], expand=True, spacing=20)
 
+        # Etiquetas para las métricas
         self.lbl_area = ft.Text("-- mm²", size=20, weight="bold", color="blue900")
         self.lbl_nec = ft.Text("--%", weight="bold", color="black")
         self.lbl_esf = ft.Text("--%", weight="bold", color="#cca300")
@@ -148,9 +146,9 @@ class NurseCareApp:
         panel_metricas = ft.Container(
             content=ft.Row([
                 ft.Column([ft.Text("Área Total"), self.lbl_area]),
-                ft.Column([ft.Text("Necrosis"), self.lbl_nec]),
-                ft.Column([ft.Text("Esfacelo"), self.lbl_esf]),
-                ft.Column([ft.Text("Granulación"), self.lbl_gra])
+                ft.Column([ft.Text("Necrosis (Gris)"), self.lbl_nec]),
+                ft.Column([ft.Text("Esfacelo (Amarillo)"), self.lbl_esf]),
+                ft.Column([ft.Text("Granulación (Rojo)"), self.lbl_gra])
             ], alignment=ft.MainAxisAlignment.SPACE_EVENLY),
             bgcolor="white", padding=20, border_radius=10,
             shadow=ft.BoxShadow(spread_radius=1, blur_radius=3, color="black12")
@@ -161,6 +159,20 @@ class NurseCareApp:
             on_click=self.volver_al_recorte,
             style=ft.ButtonStyle(bgcolor="bluegrey700", color="white")
         )
+
+        # ==========================================
+        # 3. CONSTRUIR PANTALLAS Y AÑADIR A LA PÁGININA
+        # ==========================================
+        self.pantalla_recorte = ft.Column([
+            ft.Text("Paso 1: Delimitación de la Úlcera", size=24, weight="bold", color="bluegrey900"),
+            ft.Text("Haz clic y ARRASTRA el ratón bordeando la herida para generar el contorno.", size=16),
+            ft.Row([self.btn_cargar, self.btn_limpiar, self.btn_analizar]),
+            ft.Container(height=20),
+            ft.Container(
+                content=self.detector_trazado,
+                shadow=ft.BoxShadow(spread_radius=1, blur_radius=5, color="black12")
+            )
+        ], alignment=ft.MainAxisAlignment.START, horizontal_alignment=ft.CrossAxisAlignment.CENTER)
 
         self.pantalla_resultados = ft.Column([
             ft.Row([
@@ -176,7 +188,7 @@ class NurseCareApp:
         self.page.update()
 
     # ==========================================
-    # LÓGICA DE EXTRACCIÓN Y DIBUJO
+    # LÓGICA DE EXTRACCIÓN Y TRAZADO
     # ==========================================
     def extraer_coordenadas(self, e):
         if hasattr(e, 'local_position') and e.local_position is not None:
@@ -215,7 +227,6 @@ class NurseCareApp:
 
         self.puntos_reales.append((x_real, y_real))
         self.btn_limpiar.disabled = False
-        
         self.actualizar_dibujo(cerrar_poligono=False)
 
     def trazar_borde(self, e):
@@ -235,95 +246,122 @@ class NurseCareApp:
             self.page.update()
 
     # ==========================================
-    # LÓGICA DE FLUJO DE TRABAJO
+    # PROCESAMIENTO CLÍNICO Y MOTOR PLOTLY 3D
     # ==========================================
-    def cargar_video_click(self, e):
-        ruta_test = "tu_video_de_prueba.mp4"
-        if not os.path.exists(ruta_test):
-            self.txt_placeholder_recorte.value = f"Error: No está '{ruta_test}'"
-            self.txt_placeholder_recorte.color = "red"
-            self.page.update()
-            return
-
-        try:
-            img1, img2, self.pts1, self.pts2 = self.adquisicion.escoger_2_imagenes_desde_video(ruta_test)
-            self.img1_bgr = img1
-            self.img1_original = img1.copy() 
-            self.img2_bgr = img2
-            
-            self.puntos_reales = []
-            
-            self.img_recorte.src = self.convertir_cv2_a_base64(img1)
-            self.img_recorte.visible = True
-            self.txt_placeholder_recorte.visible = False
-            
-        except Exception as ex:
-            print(f"Error cargando vídeo: {ex}")
-            
-        self.page.update()
-
-    def limpiar_recorte_click(self, e):
-        self.puntos_reales = []
-        if self.img1_original is not None:
-            self.img_recorte.src = self.convertir_cv2_a_base64(self.img1_original)
-        self.btn_analizar.disabled = True
-        self.btn_limpiar.disabled = True
-        self.page.update()
-
     def procesar_analisis(self, e):
         if len(self.puntos_reales) < 3: return
 
-        # 1. Segmentación K-Means
+        # 1. Segmentación e IA K-Means
         img_recortada, mascara_roi = self.analizador_2d.aplicar_mascara_poligono(self.img1_original, self.puntos_reales)
         img_aislada = cv2.bitwise_and(self.img1_original, self.img1_original, mask=(mascara_roi*255).astype(np.uint8))
         
         _, segmentos = self.analizador_2d.segmentar_kmeans(img_recortada)
         tej_nec, tej_gra, tej_esf = self.analizador_2d.ordenar_tejidos(segmentos)
         
-        # Corrección: Inversión de etiquetas Necrosis <-> Granulación
+        # Corrección de etiquetas invertidas Necrosis <-> Granulación
         tej_nec, tej_gra = tej_gra, tej_nec
         
         mapa_colores = np.zeros_like(img_recortada)
-        mapa_colores[cv2.cvtColor(tej_nec, cv2.COLOR_BGR2GRAY) > 0] = [50, 50, 50]    
-        mapa_colores[cv2.cvtColor(tej_esf, cv2.COLOR_BGR2GRAY) > 0] = [0, 255, 255]   
-        mapa_colores[cv2.cvtColor(tej_gra, cv2.COLOR_BGR2GRAY) > 0] = [0, 0, 255]     
+        mapa_colores[cv2.cvtColor(tej_nec, cv2.COLOR_BGR2GRAY) > 0] = [50, 50, 50]    # Gris (Necrosis)
+        mapa_colores[cv2.cvtColor(tej_esf, cv2.COLOR_BGR2GRAY) > 0] = [0, 255, 255]   # Amarillo (Esfacelo)
+        mapa_colores[cv2.cvtColor(tej_gra, cv2.COLOR_BGR2GRAY) > 0] = [0, 0, 255]     # Rojo (Granulación)
         
-        # Corrección: Aislamos el fondo en color Blanco Puro (255, 255, 255)
+        # Configurar el fondo fuera de la úlcera en Blanco Puro
         fondo_blanco = np.ones_like(img_recortada) * 255
-        mascara_3d_mask = np.expand_dims(mascara_roi, axis=-1)
-        mapa_colores = np.where(mascara_3d_mask == 1, mapa_colores, fondo_blanco)
+        mascara_tres_canales = np.expand_dims(mascara_roi, axis=-1)
+        mapa_colores = np.where(mascara_tres_canales == 1, mapa_colores, fondo_blanco)
         
-        # 2. Renderizado 3D Fotogramétrico
+        # 2. Reconstrucción Fotogramétrica 3D
         mascara_8u = (mascara_roi * 255).astype(np.uint8)
-        nube_puntos, colores_pts = self.motor_3d.calcular_3d(self.img1_bgr, self.img2_bgr, self.pts1, self.pts2, mascara_8u)
-        
-        # Generar imagen 3D usando Matplotlib en RAM
-        fig = plt.figure(figsize=(5, 5))
-        ax = fig.add_subplot(111, projection='3d')
-        
-        if nube_puntos is not None and len(nube_puntos) > 0:
-            try:
-                # Invertimos colores BGR (OpenCV) a RGB (Matplotlib) para texturizado
-                colores_rgb = colores_pts[:, ::-1] / 255.0
-                ax.scatter(nube_puntos[:, 0], nube_puntos[:, 1], nube_puntos[:, 2], c=colores_rgb, marker='.', s=15)
-            except Exception:
-                ax.scatter(nube_puntos[:, 0], nube_puntos[:, 1], nube_puntos[:, 2], c='blue', marker='.', s=15)
-        else:
-            ax.text2D(0.5, 0.5, "Ausencia de textura\npara triangular puntos", 
-                      horizontalalignment='center', verticalalignment='center', transform=ax.transAxes)
-            
-        ax.set_axis_off()
-        fig.tight_layout(pad=0)
-        
-        buf = io.BytesIO()
-        plt.savefig(buf, format='jpg', bbox_inches='tight', pad_inches=0)
-        plt.close(fig)
-        img_3d_base64 = f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}"
+        nube_puntos, _ = self.motor_3d.calcular_3d(self.img1_bgr, self.img2_bgr, self.pts1, self.pts2, mascara_8u)
 
-        # 3. Actualización de Interfaz
+        # =======================================================
+        # GENERACIÓN DE MALLA INTERACTIVA TEXTURIZADA (HTML NATIVO)
+        # =======================================================
+        fig = go.Figure()
+
+        if nube_puntos is not None and len(nube_puntos) > 5:
+            # Localizamos todos los píxeles de la imagen dentro de la úlcera delimitada
+            y_indices, x_indices = np.where(mascara_roi > 0)
+            
+            # Submuestreo controlado (paso de 12px) para asegurar rotación fluida a 60fps en web
+            salto_muestreo = 12
+            x_densos = x_indices[::salto_muestreo]
+            y_densos = y_indices[::salto_muestreo]
+
+            if len(x_densos) > 3:
+                # Extraemos las coordenadas X, Y, Z conocidas de la fotogrametría
+                puntos_x_sift = nube_puntos[:, 0]
+                puntos_y_sift = nube_puntos[:, 1]
+                puntos_z_sift = nube_puntos[:, 2]
+
+                # Interpolamos el relieve Z para la cuadrícula completa de la lesión
+                z_densos = griddata(
+                    points=np.column_stack((puntos_x_sift, puntos_y_sift)),
+                    values=puntos_z_sift,
+                    xi=(x_densos, y_densos),
+                    method='nearest'
+                )
+
+                # Mapeamos la textura fotográfica real (RGB) sobre cada vértice de la malla
+                colores_vertices = []
+                for x_p, y_p in zip(x_densos, y_densos):
+                    # OpenCV usa BGR, Plotly usa RGB. Convertimos:
+                    b, g, r = self.img1_original[y_p, x_p]
+                    colores_vertices.append(f"rgb({r},{g},{b})")
+
+                # Generamos la topología matemática de triángulos
+                triangulacion = Delaunay(np.column_stack((x_densos, y_densos)))
+                indices_triangulos = triangulacion.simplices
+
+                # Construimos la estructura Mesh3D interactiva texturizada
+                # Ajustes de cámara y proporciones reales para fines clínicos
+                fig.update_layout(
+                    margin=dict(l=0, r=0, b=0, t=0),
+                    scene=dict(
+                        xaxis=dict(visible=False),
+                        yaxis=dict(visible=False, autorange="reversed"), # FIX: 'reversed' con 'd' final
+                        zaxis=dict(visible=False),
+                        aspectmode='data' # Garantiza proporciones geométricas reales no deformadas
+                    )
+                )
+        else:
+            # Si no hay textura suficiente para triangular
+            fig.add_trace(go.Scatter3d(
+                x=[0], y=[0], z=[0], mode="text",
+                text=["Textura insuficiente para estimar profundidad Z"],
+                textposition="top center"
+            ))
+
+        # Ajustes de cámara y proporciones reales para fines clínicos
+        fig.update_layout(
+            margin=dict(l=0, r=0, b=0, t=0),
+            scene=dict(
+                xaxis=dict(visible=False),
+                yaxis=dict(visible=False, autorange="reversed"), # FIX: 'reversed' con 'd' al final
+                zaxis=dict(visible=False),
+                aspectmode='data' # Garantiza proporciones geométricas reales no deformadas
+            )
+        )
+
+        # -------------------------------------------------------------
+        # SOLUCIÓN DOCKER: Exportamos a HTML en memoria y renderizamos
+        # -------------------------------------------------------------
+        # Generamos el código HTML interactivo COMPLETO
+        html_str = fig.to_html(include_plotlyjs="cdn", full_html=True) # FIX: Documento web completo
+        # Lo convertimos a una URL de datos Base64
+        b64_html = base64.b64encode(html_str.encode("utf-8")).decode("utf-8")
+        data_uri = f"data:text/html;base64,{b64_html}"
+        
+        # ¡AQUÍ SÍ! Inyectamos el HTML interactivo reemplazando el texto temporal
+        self.visor_res_3d.content = fvw.WebView(
+            url=data_uri,
+            expand=True
+        )
+
+        # 3. Renderizado y Actualización de Pantallas
         self.visor_res_recorte.src = self.convertir_cv2_a_base64(img_aislada)
         self.visor_res_segmentado.src = self.convertir_cv2_a_base64(mapa_colores)
-        self.visor_res_3d.src = img_3d_base64
 
         resultados = self.analizador_2d.calcular_areas_y_porcentajes(mascara_roi, tej_nec, tej_gra, tej_esf, factor_escala=0.25)
         self.lbl_area.value = f"{resultados['areas']['total']:.2f} mm²"
@@ -338,6 +376,36 @@ class NurseCareApp:
     def volver_al_recorte(self, e):
         self.pantalla_resultados.visible = False
         self.pantalla_recorte.visible = True
+        self.page.update()
+
+    def cargar_video_click(self, e):
+        ruta_test = "tu_video_de_prueba.mp4"
+        if not os.path.exists(ruta_test):
+            self.txt_placeholder_recorte.value = f"Error: No está '{ruta_test}'"
+            self.txt_placeholder_recorte.color = "red"
+            self.page.update()
+            return
+
+        try:
+            img1, img2, self.pts1, self.pts2 = self.adquisicion.escoger_2_imagenes_desde_video(ruta_test)
+            self.img1_bgr = img1
+            self.img1_original = img1.copy() 
+            self.img2_bgr = img2
+            self.puntos_reales = []
+            
+            self.img_recorte.src = self.convertir_cv2_a_base64(img1)
+            self.img_recorte.visible = True
+            self.txt_placeholder_recorte.visible = False
+        except Exception as ex:
+            print(f"Error cargando vídeo: {ex}")
+        self.page.update()
+
+    def limpiar_recorte_click(self, e):
+        self.puntos_reales = []
+        if self.img1_original is not None:
+            self.img_recorte.src = self.convertir_cv2_a_base64(self.img1_original)
+        self.btn_analizar.disabled = True
+        self.btn_limpiar.disabled = True
         self.page.update()
 
 def main(page: ft.Page):
