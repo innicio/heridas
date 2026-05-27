@@ -82,10 +82,15 @@ class NurseCareApp:
 
         self.detector_trazado = ft.GestureDetector(
             content=self.contenedor_pizarra,
-            on_pan_update=self.trazar_borde,
-            on_pan_end=self.soltar_raton, 
-            on_tap_down=self.clic_suelto_borde
+            on_tap_down=self.añadir_vertice_clic # Nueva función médica por vértices
         )
+
+        
+        # Añadimos etiquetas de diagnóstico técnico para evaluar la salud del algoritmo 3D
+        self.lbl_diagnostico_sift = ft.Text("Puntos SIFT: --", size=12, color="grey700", weight="bold")
+        self.lbl_diagnostico_z = ft.Text("Relieve Z Original: --", size=12, color="grey700", weight="bold")
+
+        
 
         # Visores del Dashboard de Resultados
         self.visor_res_recorte = ft.Image(src="", expand=True, fit="contain")
@@ -211,39 +216,54 @@ class NurseCareApp:
         self.img_recorte.src = self.convertir_cv2_a_base64(img_dibujo)
         self.page.update()
 
-    def guardar_y_dibujar_punto(self, x_web, y_web):
-        if self.img1_original is None: return
+    # ==========================================
+    # LÓGICA DE ANOTACIÓN CLÍNICA POR VÉRTICES (CLIC A CLIC)
+    # ==========================================
+    def añadir_vertice_clic(self, e):
+        """Añade un vértice preciso cada vez que el usuario hace clic en la imagen."""
+        x_web, y_web = self.extraer_coordenadas(e)
+        if x_web is None or y_web is None or self.img1_original is None: return
 
+        # Conversión geométrica a coordenadas reales de la matriz de la imagen
         alto_real, ancho_real = self.img1_original.shape[:2]
         x_real = int(x_web * ancho_real / self.ANCHO_VISOR_GRANDE)
         y_real = int(y_web * alto_real / self.ALTO_VISOR_GRANDE)
 
-        if len(self.puntos_reales) > 0:
-            ultimo_x, ultimo_y = self.puntos_reales[-1]
-            distancia = ((x_real - ultimo_x)**2 + (y_real - ultimo_y)**2)**0.5
-            if distancia < 15:
-                return
-
+        # Añadimos el nuevo nodo de la úlcera
         self.puntos_reales.append((x_real, y_real))
         self.btn_limpiar.disabled = False
-        self.actualizar_dibujo(cerrar_poligono=False)
-
-    def trazar_borde(self, e):
-        x, y = self.extraer_coordenadas(e)
-        if x is not None and y is not None:
-            self.guardar_y_dibujar_punto(x, y)
-
-    def clic_suelto_borde(self, e):
-        x, y = self.extraer_coordenadas(e)
-        if x is not None and y is not None:
-            self.guardar_y_dibujar_punto(x, y)
-
-    def soltar_raton(self, e):
-        if len(self.puntos_reales) > 2:
-            self.actualizar_dibujo(cerrar_poligono=True)
+        
+        # Si ya hay al menos 3 vértices, el polígono es viable y activamos el botón de análisis
+        if len(self.puntos_reales) >= 3:
             self.btn_analizar.disabled = False
-            self.page.update()
+            
+        # Dibujamos el estado actual cerrando siempre el contorno de forma dinámica
+        self.actualizar_dibujo(cerrar_poligono=True)
 
+    def actualizar_dibujo(self, cerrar_poligono=True):
+        """Dibuja los nodos rojos y las líneas amarillas de guía clínica."""
+        if self.img1_original is None: return
+        
+        img_dibujo = self.img1_original.copy()
+        num_puntos = len(self.puntos_reales)
+        
+        for i in range(num_puntos):
+            # Pintamos el nodo
+            cv2.circle(img_dibujo, self.puntos_reales[i], 5, (0, 0, 255), -1)
+            # Unimos con el nodo anterior
+            if i > 0:
+                cv2.line(img_dibujo, self.puntos_reales[i-1], self.puntos_reales[i], (0, 255, 255), 2)
+                
+        # Cerramos dinámicamente el lazo uniendo el último punto con el primero en verde
+        if cerrar_poligono and num_puntos > 2:
+            cv2.line(img_dibujo, self.puntos_reales[-1], self.puntos_reales[0], (0, 255, 0), 2)
+
+        self.img_recorte.src = self.convertir_cv2_a_base64(img_dibujo)
+        self.page.update()
+
+    # ==========================================
+    # PROCESAMIENTO CLÍNICO Y MOTOR PLOTLY 3D
+    # ==========================================
     # ==========================================
     # PROCESAMIENTO CLÍNICO Y MOTOR PLOTLY 3D
     # ==========================================
@@ -257,17 +277,15 @@ class NurseCareApp:
         _, segmentos = self.analizador_2d.segmentar_kmeans(img_recortada)
         tej_nec, tej_gra, tej_esf = self.analizador_2d.ordenar_tejidos(segmentos)
         
-        # --- FIX DEFINITIVO DE COLOR ---
-        # Intercambiamos de raíz las variables devueltas por tu motor para corregir la inversión
+        # Corrección de etiquetas para la IA: Gris (Necrosis), Amarillo (Esfacelo), Rojo (Granulación)
         tej_correct_nec = tej_gra
         tej_correct_gra = tej_nec
         
         mapa_colores = np.zeros_like(img_recortada)
-        mapa_colores[cv2.cvtColor(tej_correct_nec, cv2.COLOR_BGR2GRAY) > 0] = [50, 50, 50]    # Gris (Necrosis)
-        mapa_colores[cv2.cvtColor(tej_esf, cv2.COLOR_BGR2GRAY) > 0] = [0, 255, 255]   # Amarillo (Esfacelo)
-        mapa_colores[cv2.cvtColor(tej_correct_gra, cv2.COLOR_BGR2GRAY) > 0] = [0, 0, 255]     # Rojo (Granulación)
+        mapa_colores[cv2.cvtColor(tej_correct_nec, cv2.COLOR_BGR2GRAY) > 0] = [50, 50, 50]    
+        mapa_colores[cv2.cvtColor(tej_esf, cv2.COLOR_BGR2GRAY) > 0] = [0, 255, 255]   
+        mapa_colores[cv2.cvtColor(tej_correct_gra, cv2.COLOR_BGR2GRAY) > 0] = [0, 0, 255]     
         
-        # Configurar el fondo fuera de la úlcera en Blanco Puro
         fondo_blanco = np.ones_like(img_recortada) * 255
         mascara_tres_canales = np.expand_dims(mascara_roi, axis=-1)
         mapa_colores = np.where(mascara_tres_canales == 1, mapa_colores, fondo_blanco)
@@ -277,34 +295,29 @@ class NurseCareApp:
         nube_puntos, _ = self.motor_3d.calcular_3d(self.img1_bgr, self.img2_bgr, self.pts1, self.pts2, mascara_8u)
 
         # =======================================================
-        # GENERACIÓN DE MALLA 3D (DELAUNAY + EXAGERACIÓN DE RELIEVE)
+        # 3. GENERACIÓN DE MALLA 3D (DELAUNAY + EXAGERACIÓN DE RELIEVE)
         # =======================================================
         fig = go.Figure()
 
         if nube_puntos is not None and len(nube_puntos) > 5:
-            # 1. Localizamos píxeles dentro de la máscara (la forma de la herida)
             y_indices, x_indices = np.where(mascara_roi > 0)
             
-            # Submuestreo para fluidez web (malla de densidad media)
             salto_muestreo = 12
             x_densos = x_indices[::salto_muestreo]
             y_densos = y_indices[::salto_muestreo]
 
             if len(x_densos) > 3:
-                # 2. Extraemos X, Y, Z de la nube dispersa de SIFT
                 puntos_x_sift = nube_puntos[:, 0]
                 puntos_y_sift = nube_puntos[:, 1]
                 puntos_z_sift = nube_puntos[:, 2]
 
-                # 3. Interpolación suave (Linear) en lugar de escalonada
-                # Primero intentamos lineal para suavidad de la malla orgánica
+                # Interpolación suave (Linear) 
                 z_linear = griddata(
                     points=np.column_stack((puntos_x_sift, puntos_y_sift)),
                     values=puntos_z_sift,
                     xi=(x_densos, y_densos),
                     method='linear'
                 )
-                # Rellenamos los bordes ciegos con el método 'nearest'
                 z_nearest = griddata(
                     points=np.column_stack((puntos_x_sift, puntos_y_sift)),
                     values=puntos_z_sift,
@@ -313,26 +326,21 @@ class NurseCareApp:
                 )
                 z_densos = np.where(np.isnan(z_linear), z_nearest, z_linear)
 
-                # 4. FIX DE APLASTAMIENTO (Escalado topográfico)
-                # Forzamos matemáticamente que el relieve sea visible escalando Z
+                # FIX DE APLASTAMIENTO (Escalado topográfico)
                 rango_x = np.max(x_densos) - np.min(x_densos)
                 rango_z = np.max(z_densos) - np.min(z_densos)
                 if rango_z > 0.001:
-                    # Forzamos que la profundidad represente visualmente el 25% del ancho de la lesión
                     factor_relieve = (rango_x * 0.25) / rango_z
                     z_densos = (z_densos - np.min(z_densos)) * factor_relieve
 
-                # 5. Mapeo de Textura RGB Original
                 colores_vertices = []
                 for x_p, y_p in zip(x_densos, y_densos):
                     b, g, r = self.img1_original[y_p, x_p]
                     colores_vertices.append(f"rgb({r},{g},{b})")
 
-                # 6. Triangulación de Delaunay
                 triangulacion = Delaunay(np.column_stack((x_densos, y_densos)))
                 indices_triangulos = triangulacion.simplices
 
-                # 7. Renderizado del objeto Mesh3d
                 fig.add_trace(go.Mesh3d(
                     x=x_densos,
                     y=y_densos,
@@ -341,8 +349,8 @@ class NurseCareApp:
                     j=indices_triangulos[:, 1],
                     k=indices_triangulos[:, 2],
                     vertexcolor=colores_vertices,
-                    flatshading=False, # Suavizado Phong continuo
-                    lighting=dict(ambient=0.7, diffuse=0.8, specular=0.1, roughness=0.9) # Textura mate orgánica
+                    flatshading=False, 
+                    lighting=dict(ambient=0.7, diffuse=0.8, specular=0.1, roughness=0.9) 
                 ))
         else:
             fig.add_trace(go.Scatter3d(
@@ -351,35 +359,42 @@ class NurseCareApp:
                 textposition="top center"
             ))
 
-        # Ajustes de cámara
         fig.update_layout(
             margin=dict(l=0, r=0, b=0, t=0),
             scene=dict(
                 xaxis=dict(visible=False),
                 yaxis=dict(visible=False, autorange="reversed"), 
                 zaxis=dict(visible=False),
-                aspectmode='auto' # FIX: Fundamental cambiar a 'auto' para permitir la exageración en Z
+                aspectmode='auto' 
             )
         )
 
-        # -------------------------------------------------------------
-        # FIX VISOR 3D: Convertimos a string HTML completo y codificamos en Base64
-        # -------------------------------------------------------------
+        # 4. Exportamos a HTML en memoria y renderizamos
         html_str = fig.to_html(include_plotlyjs="cdn", full_html=True)
         b64_html = base64.b64encode(html_str.encode("utf-8")).decode("utf-8")
         data_uri = f"data:text/html;base64,{b64_html}"
         
-        # Inyectamos de forma segura la URL de datos en el WebView web nativo
         self.visor_res_3d.content = fvw.WebView(
             url=data_uri,
             expand=True
         )
 
-        # 3. Renderizado y Actualización de Pantallas
+        # 5. Actualización de Interfaz y Tarjetas 2D
         self.visor_res_recorte.src = self.convertir_cv2_a_base64(img_aislada)
         self.visor_res_segmentado.src = self.convertir_cv2_a_base64(mapa_colores)
 
-        # Enviamos las variables corregidas al calculador de métricas para que los porcentajes no bailen
+        # =======================================================
+        # 6. PANELES DE TEXTO: TELEMETRÍA Y MÉTRICAS
+        # =======================================================
+        if nube_puntos is not None:
+            self.lbl_diagnostico_sift.value = f"Puntos SIFT: {len(nube_puntos)}"
+            z_puros = nube_puntos[:, 2]
+            rango_z_puro = np.max(z_puros) - np.min(z_puros)
+            self.lbl_diagnostico_z.value = f"Delta Z original: {rango_z_puro:.4f} uds"
+        else:
+            self.lbl_diagnostico_sift.value = "Puntos SIFT: 0 (¡Fallo de emparejamiento!)"
+            self.lbl_diagnostico_z.value = "Delta Z original: 0.0000 uds"
+
         resultados = self.analizador_2d.calcular_areas_y_porcentajes(mascara_roi, tej_correct_nec, tej_correct_gra, tej_esf, factor_escala=0.25)
         self.lbl_area.value = f"{resultados['areas']['total']:.2f} mm²"
         self.lbl_nec.value = f"{resultados['porcentajes']['necrotico']:.1f}%"
