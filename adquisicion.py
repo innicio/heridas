@@ -15,73 +15,64 @@ class MotorAnalisisHeridas:
         self.camera_matrix = None 
         self.dist_coeffs = None
 
-    def escoger_2_imagenes_desde_video(self, ruta_video):
+    def extraer_secuencia_estereo(self, ruta_video, num_imagenes=5, gap_estereo=10):
         """
-        Traducción directa del algoritmo de MATLAB f_escoger_2_imagenes_desde_video.
-        Garantiza un salto de fotogramas (baseline) para el paralaje topográfico.
+        Evolución del algoritmo original para capturar múltiples ángulos (SFM).
+        Busca secuencialmente fotogramas garantizando el baseline.
+        
+        Devuelve:
+            list: Lista de imágenes capturadas (matrices BGR).
+            list: Lista de puntos de referencia refinados (esquinas del tablero).
         """
         cap = cv2.VideoCapture(ruta_video)
         if not cap.isOpened():
             raise ValueError(f"Error: No se pudo abrir el vídeo '{ruta_video}'")
 
-        # Emulando info.Duration * info.FrameRate
         frames_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        # Variables de control
+        i = 70       # Fotograma de inicio
+        salto = 2    # Avance en la búsqueda si no hay patrón
+        
+        imagenes_capturadas = []
+        puntos_referencia = []
 
-        # Variables de control idénticas al script original
-        i = 70       # Fotograma de inicio (REVISAR según el vídeo, como anotaste)
-        salto = 2    # Avance en la búsqueda
-        gap_estereo = 10 # j = i + 10 (La clave del relieve 3D)
-
-        imagen1 = None
-        imagen2 = None
-        refPoints1 = None
-        refPoints2 = None
-
-        while i <= frames_total - salto - gap_estereo:
-            # Nos posicionamos en el frame 'i' y leemos
+        while i <= frames_total and len(imagenes_capturadas) < num_imagenes:
             cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-            ret1, frame1 = cap.read()
-            if not ret1:
+            ret, frame = cap.read()
+            
+            if not ret:
                 break
 
-            # Búsqueda del patrón (equivalente a detectCheckerboardPoints)
-            gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
-            encontrado1, esquinas1 = cv2.findChessboardCorners(gray1, self.chessboard_size, None)
+            # Búsqueda del patrón de calibración
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            encontrado, esquinas = cv2.findChessboardCorners(gray, self.chessboard_size, None)
 
-            # Si detecta las esquinas, comprobamos que sean exactamente 54
-            if encontrado1 and esquinas1 is not None and len(esquinas1) == 54:
+            # Validamos que se detecten exactamente los 54 vértices internos
+            if encontrado and esquinas is not None and len(esquinas) == 54:
                 
-                # Si cumple, miramos 10 frames hacia el futuro (j)
-                j = i + gap_estereo
-                cap.set(cv2.CAP_PROP_POS_FRAMES, j)
-                ret2, frame2 = cap.read()
+                # Refinamiento subpíxel de las coordenadas del tablero
+                criterios = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+                esquinas_refinadas = cv2.cornerSubPix(gray, esquinas, (11, 11), (-1, -1), criterios)
 
-                if ret2:
-                    gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
-                    encontrado2, esquinas2 = cv2.findChessboardCorners(gray2, self.chessboard_size, None)
+                # Almacenamos el fotograma y sus anclas topográficas
+                imagenes_capturadas.append(frame)
+                puntos_referencia.append(esquinas_refinadas)
 
-                    # Verificamos los 54 puntos en la segunda imagen
-                    if encontrado2 and esquinas2 is not None and len(esquinas2) == 54:
-                        
-                        # Guardamos resultados y simulamos el k=k+1 y cierre de bucle
-                        imagen1 = frame1
-                        imagen2 = frame2
-                        # Refinamos las esquinas para máxima precisión subpíxel (opcional pero recomendado)
-                        criterios = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-                        refPoints1 = cv2.cornerSubPix(gray1, esquinas1, (11, 11), (-1, -1), criterios)
-                        refPoints2 = cv2.cornerSubPix(gray2, esquinas2, (11, 11), (-1, -1), criterios)
-                        
-                        break # Termina el while (equivalente a i = frames - salto en MATLAB)
-
-            # Avanzamos el contador
-            i += salto
+                # PUNTO CRÍTICO: Una vez capturado un frame válido, forzamos el salto 
+                # del baseline (gap_estereo) para asegurar que la cámara se ha movido
+                i += gap_estereo
+            else:
+                # Si no detecta el patrón completo, avanzamos el salto corto estándar
+                i += salto
 
         cap.release()
 
-        if imagen1 is None or imagen2 is None:
-            raise RuntimeError("El algoritmo de salto no encontró 2 fotogramas válidos separados por 10 frames.")
+        # Validación clínica de los datos
+        if len(imagenes_capturadas) < 2:
+            raise RuntimeError("La geometría de captura falló: No se encontraron suficientes fotogramas válidos separados por el baseline.")
 
-        return imagen1, imagen2, refPoints1, refPoints2
+        return imagenes_capturadas, puntos_referencia
 
 # --- Ejemplo de uso ---
 # motor = MotorAnalisisHeridas(chessboard_size=(9, 6))

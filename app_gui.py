@@ -92,16 +92,15 @@ class NurseCareApp:
 
         
 
-        # Visores del Dashboard de Resultados
+        # 1. VISORES E IMÁGENES (Asegúrate de que este bloque está arriba en init_ui)
         self.visor_res_recorte = ft.Image(src="", expand=True, fit="contain")
         self.visor_res_segmentado = ft.Image(src="", expand=True, fit="contain")
+        self.visor_res_3d = ft.Container(content=ft.Text("Malla 3D en construcción...", color="grey500"), alignment=ft.Alignment(0, 0), expand=True)
         
-        # Inicializamos el visor como un simple texto al arrancar la app
-        self.visor_res_3d = ft.Container(
-            content=ft.Text("Malla 3D en construcción...", color="grey500"),
-            alignment=ft.Alignment(0, 0),
-            expand=True
-        )
+        # ---> AÑADE ESTA LÍNEA AQUÍ MISMO <---
+        self.visor_res_nube = ft.Container(content=ft.Text("Nube de puntos cruda...", color="grey500"), alignment=ft.Alignment(0, 0), expand=True)
+        
+
 
         # ==========================================
         # 2. DEFINIR BOTONES Y ESTRUCTURA DE TARJETAS
@@ -135,10 +134,15 @@ class NurseCareApp:
                 shadow=ft.BoxShadow(spread_radius=1, blur_radius=3, color="black12")
             )
 
-        tarjetas_resultados = ft.Row([
-            crear_tarjeta("1. Recorte Real 2D", self.visor_res_recorte),
-            crear_tarjeta("2. Segmentación Aislada", self.visor_res_segmentado),
-            crear_tarjeta("3. Malla 3D Texturizada", self.visor_res_3d)
+        tarjetas_resultados = ft.Column([
+            ft.Row([
+                crear_tarjeta("1. Recorte", self.visor_res_recorte), 
+                crear_tarjeta("2. Segmentación", self.visor_res_segmentado)
+            ], expand=True),
+            ft.Row([
+                crear_tarjeta("3. Nube de Puntos Cruda", self.visor_res_nube), 
+                crear_tarjeta("4. Malla 3D", self.visor_res_3d)
+            ], expand=True)
         ], expand=True, spacing=20)
 
         # Etiquetas para las métricas
@@ -224,10 +228,22 @@ class NurseCareApp:
         x_web, y_web = self.extraer_coordenadas(e)
         if x_web is None or y_web is None or self.img1_original is None: return
 
-        # Conversión geométrica a coordenadas reales de la matriz de la imagen
+        # Conversión geométrica corrigiendo el "letterboxing" de Flet
         alto_real, ancho_real = self.img1_original.shape[:2]
-        x_real = int(x_web * ancho_real / self.ANCHO_VISOR_GRANDE)
-        y_real = int(y_web * alto_real / self.ALTO_VISOR_GRANDE)
+        escala = min(self.ANCHO_VISOR_GRANDE / ancho_real, self.ALTO_VISOR_GRANDE / alto_real)
+        
+        ancho_mostrado = ancho_real * escala
+        alto_mostrado = alto_real * escala
+        
+        offset_x = (self.ANCHO_VISOR_GRANDE - ancho_mostrado) / 2
+        offset_y = (self.ALTO_VISOR_GRANDE - alto_mostrado) / 2
+        
+        x_real = int((x_web - offset_x) / escala)
+        y_real = int((y_web - offset_y) / escala)
+        
+        # Ignorar clics si se hacen en la franja blanca fuera de la foto
+        if x_real < 0 or x_real >= ancho_real or y_real < 0 or y_real >= alto_real:
+            return
 
         # Añadimos el nuevo nodo de la úlcera
         self.puntos_reales.append((x_real, y_real))
@@ -292,7 +308,7 @@ class NurseCareApp:
         
         # 2. Reconstrucción Fotogramétrica 3D
         mascara_8u = (mascara_roi * 255).astype(np.uint8)
-        nube_puntos, _ = self.motor_3d.calcular_3d(self.img1_bgr, self.img2_bgr, self.pts1, self.pts2, mascara_8u)
+        nube_puntos, _ = self.motor_3d.calcular_3d(self.lista_imagenes, self.lista_pts, mascara_8u)
 
         # =======================================================
         # 3. GENERACIÓN DE MALLA 3D (DELAUNAY + EXAGERACIÓN DE RELIEVE)
@@ -369,15 +385,29 @@ class NurseCareApp:
             )
         )
 
-        # 4. Exportamos a HTML en memoria y renderizamos
-        html_str = fig.to_html(include_plotlyjs="cdn", full_html=True)
-        b64_html = base64.b64encode(html_str.encode("utf-8")).decode("utf-8")
-        data_uri = f"data:text/html;base64,{b64_html}"
-        
-        self.visor_res_3d.content = fvw.WebView(
-            url=data_uri,
-            expand=True
-        )
+    
+
+        # 4. Exportamos a HTML en memoria y renderizamos ambos visores
+        html_malla = fig.to_html(include_plotlyjs="cdn", full_html=True)
+        b64_malla = base64.b64encode(html_malla.encode("utf-8")).decode("utf-8")
+        self.visor_res_3d.content = fvw.WebView(url=f"data:text/html;base64,{b64_malla}", expand=True)
+
+        # Generamos y exportamos la Nube Cruda directamente desde la matriz original
+        if nube_puntos is not None and len(nube_puntos) > 0:
+            fig_nube = go.Figure(data=[go.Scatter3d(
+                x=nube_puntos[:, 0], y=nube_puntos[:, 1], z=nube_puntos[:, 2],
+                mode='markers',
+                marker=dict(size=3, color=nube_puntos[:, 2], colorscale='Viridis', opacity=0.8)
+            )])
+            fig_nube.update_layout(
+                margin=dict(l=0, r=0, b=0, t=0),
+                scene=dict(xaxis_visible=False, yaxis_visible=False, zaxis_visible=False, aspectmode='data')
+            )
+            html_nube = fig_nube.to_html(include_plotlyjs="cdn", full_html=True)
+            b64_nube = base64.b64encode(html_nube.encode("utf-8")).decode("utf-8")
+            self.visor_res_nube.content = fvw.WebView(url=f"data:text/html;base64,{b64_nube}", expand=True)
+        else:
+            self.visor_res_nube.content = ft.Text("No hay puntos suficientes", color="red")
 
         # 5. Actualización de Interfaz y Tarjetas 2D
         self.visor_res_recorte.src = self.convertir_cv2_a_base64(img_aislada)
@@ -419,17 +449,22 @@ class NurseCareApp:
             return
 
         try:
-            img1, img2, self.pts1, self.pts2 = self.adquisicion.escoger_2_imagenes_desde_video(ruta_test)
-            self.img1_bgr = img1
-            self.img1_original = img1.copy() 
-            self.img2_bgr = img2
+            # 1. Recogemos las DOS listas (imágenes y puntos)
+            self.lista_imagenes, self.lista_pts = self.adquisicion.extraer_secuencia_estereo(ruta_test, num_imagenes=5)
+            
+            # 2. Usamos el primer fotograma [0] de la secuencia como nuestra imagen base para recortar
+            self.img1_bgr = self.lista_imagenes[0]
+            self.img1_original = self.lista_imagenes[0].copy() 
             self.puntos_reales = []
             
-            self.img_recorte.src = self.convertir_cv2_a_base64(img1)
+            # 3. Actualizamos la interfaz
+            self.img_recorte.src = self.convertir_cv2_a_base64(self.img1_bgr)
             self.img_recorte.visible = True
             self.txt_placeholder_recorte.visible = False
+            
         except Exception as ex:
             print(f"Error cargando vídeo: {ex}")
+            
         self.page.update()
 
     def limpiar_recorte_click(self, e):
